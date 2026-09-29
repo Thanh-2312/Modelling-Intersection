@@ -18,12 +18,17 @@ class DummyVehicle:
 
 class VehicleController:
     def __init__(self):
-        # IDM Parameters
+        # IDM Parameters (Mục 1.5 - AI.md)
         self.T = 1.5       # Thời gian bám đuôi an toàn (s)
-        self.delta = 4.0   # Hệ số gia tốc
-        self.s0 = 2.0      # Khoảng cách dừng tối thiểu (m)
-        self.W_road = 7.0  # Bề rộng toàn bộ đường (7m: 1 làn vào + 1 làn ra)
-        self.W_half = 3.5  # Nửa bề rộng đường (3.5m)
+        self.delta = 4.0   # Số mũ gia tốc
+        self.s0 = 2.0      # Khoảng cách dừng tĩnh tối thiểu (m)
+        self.W_road = 21.0 # Bề rộng toàn bộ đường (21m: 3 làn vào + 3 làn ra)
+        self.W_half = 10.5 # Nửa bề rộng đường (10.5m)
+
+        # Vị trí xa nhất xe rẽ trái được phép nhích vào khi chờ khe hở (Mục 4.3)
+        self.LEFT_TURN_WAIT_S = -1.0
+        # Ngưỡng vận tốc (m/s): xe rẽ trái đi chậm hơn mức này → đang chờ khe hở
+        self.LEFT_TURN_BLOCK_SPEED = 2.0
 
     def get_frenet_coords(self, veh):
         """
@@ -175,6 +180,16 @@ class VehicleController:
         conflict_dummy = None
         min_t_ego = float('inf')
 
+        # Hàm tính điểm ưu tiên theo công thức AI.md mục 4.4:
+        # Score = -1.0*TTI + 1.5*I_straight + 0.5*I_right + 2.0*I_intersection
+        # Xe có điểm số THẤP HƠN phải nhường
+        def priority_score(veh, dist, v_eff):
+            TTI = dist / v_eff
+            I_straight = 1.5 if veh.turn_direction == 'Straight' else 0.0
+            I_right = 0.5 if veh.turn_direction == 'Right' else 0.0
+            I_intersection = 2.0 if getattr(veh, 'nav_state', '') == 'in_intersection' else 0.0
+            return -1.0 * TTI + I_straight + I_right + I_intersection
+
         for v in vehicles:
             if v == ego or getattr(v, 'nav_state', '') in ['leaving', 'departed']:
                 continue
@@ -197,39 +212,22 @@ class VehicleController:
             if not self.paths_conflict(ego, v):
                 continue
 
-            # 4. Xung đột giữa 2 xe ngược chiều (Opposing traffic: VD Bắc - Nam cùng pha xanh):
-            # Xe rẽ trái đã có module Gap Acceptance riêng xử lý, xe đi thẳng tuyệt đối không nhường xe rẽ trái
+            # 4. Xung đột giữa 2 xe ngược chiều:
+            # Xe đi thẳng ưu tiên tuyệt đối; rẽ trái đã có Gap Acceptance
             opp_origin = {'North': 'South', 'South': 'North',
                           'East': 'West', 'West': 'East'}.get(ego.origin)
             if v.origin == opp_origin:
                 if ego.turn_direction == 'Straight':
-                    continue  # Đi thẳng ưu tiên tuyệt đối
+                    continue
                 elif ego.turn_direction == 'Left' and v.turn_direction == 'Straight':
-                    continue  # Xe rẽ trái nhường xe đi thẳng đã có Gap Acceptance xử lý ở mục 5
+                    continue
 
-            # 5. Phân định quyền ưu tiên giữa 2 luồng cắt ngang:
+            # 5. Phân định quyền ưu tiên bằng công thức điểm số (Mục 4.4 AI.md)
             v_v_eff = max(v.v, 3.0)
-            t_v = dist_v / v_v_eff
+            score_ego = priority_score(ego, dist_ego, v_ego_eff)
+            score_v = priority_score(v, dist_v, v_v_eff)
 
-            ego_yields = False
-
-            # Nếu ego đã gần tâm hơn hẳn v (ego vào trước), ego được ưu tiên đi trước
-            if dist_ego < dist_v - 1.5:
-                ego_yields = False
-            elif dist_v < dist_ego - 1.5:
-                ego_yields = True
-            else:
-                # Nếu hai xe đến gần như cùng lúc:
-                if ego.turn_direction != 'Straight' and v.turn_direction == 'Straight':
-                    ego_yields = True
-                elif ego.turn_direction == 'Straight' and v.turn_direction != 'Straight':
-                    ego_yields = False
-                else:
-                    # Cùng đi thẳng hoặc cùng rẽ: Quy tắc nhường xe bên phải (Right-hand rule)
-                    right_branch = {'North': 'West', 'West': 'South',
-                                    'South': 'East', 'East': 'North'}[ego.origin]
-                    if v.origin == right_branch:
-                        ego_yields = True
+            ego_yields = (score_ego < score_v)
 
             if ego_yields:
                 # Nếu ego đang ở ngoài tiếp cận, dừng trước vạch dừng hoặc mép ngã tư
@@ -285,9 +283,11 @@ class VehicleController:
             L_v_proj = v.L * abs_cos + v.W * abs_sin
             W_v_proj = v.L * abs_sin + v.W * abs_cos
 
-            # Bề rộng hành lang an toàn (nửa bên trái + nửa bên phải)
-            # Trừ nhẹ 0.15m để tránh bắt nhầm xe ở làn kế bên
-            corridor_half_width = (ego.W + W_v_proj) / 2.0 - 0.15
+            # Bề rộng hành lang an toàn theo AI.md mục 4.5.1 Bước 3:
+            # margin = -0.2m cho xe máy (cho phép khai thác khe hẹp)
+            # margin = 0.0m cho ô tô
+            margin = -0.2 if ego.v_type == 'Motorcycle' else 0.0
+            corridor_half_width = (ego.W + W_v_proj) / 2.0 + margin
 
             if abs(d_rel) < corridor_half_width:
                 # Tính khoảng cách thông thủy giữa đầu ego và đuôi v

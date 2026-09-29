@@ -49,17 +49,18 @@ def setup_plot():
     fig, ax = plt.subplots(figsize=(10, 10))
     ax.set_aspect('equal')
 
-    W = 7.0
-    half_W = W / 2
-    L = SPAWN_DIST + 10.0  # Vẽ đường dài hơn điểm sinh xe 1 chút
+    # Thông số hình học ngã tư (AI.md mục 1.1)
+    W = 21.0        # Chiều rộng mỗi nhánh (21m: 3 làn vào + 3 làn ra)
+    half_W = W / 2  # 10.5m
+    L = SPAWN_DIST + 10.0
 
     ax.set_xlim(-ZOOM_RANGE, ZOOM_RANGE)
     ax.set_ylim(-ZOOM_RANGE, ZOOM_RANGE)
-    ax.set_title("2D Continuous Intersection Simulation (IDM & Swerving)")
+    ax.set_title("2D Continuous Intersection Simulation (IDM + Swerving) - 6 Làn")
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
 
-    # 1. Vẽ ranh giới đường
+    # 1. Ranh giới đường
     road_kwargs = {'color': 'black', 'linewidth': 2}
     ax.plot([-L, -half_W], [half_W, half_W], **road_kwargs)
     ax.plot([-L, -half_W], [-half_W, -half_W], **road_kwargs)
@@ -71,28 +72,39 @@ def setup_plot():
     ax.plot([-half_W, -half_W], [half_W, L], **road_kwargs)
     ax.plot([half_W, half_W], [half_W, L], **road_kwargs)
 
-    # Vạch đứt phân làn giữa tim đường
-    ax.plot([-L, -half_W], [0, 0], color='gray', linestyle='--', linewidth=1)
-    ax.plot([half_W, L], [0, 0], color='gray', linestyle='--', linewidth=1)
-    ax.plot([0, 0], [-L, -half_W], color='gray', linestyle='--', linewidth=1)
-    ax.plot([0, 0], [half_W, L], color='gray', linestyle='--', linewidth=1)
+    # Vạch tim đường (nét liền vàng)
+    center_kwargs = {'color': 'goldenrod', 'linewidth': 2, 'linestyle': '-'}
+    ax.plot([-L, -half_W], [0, 0], **center_kwargs)
+    ax.plot([half_W, L], [0, 0], **center_kwargs)
+    ax.plot([0, 0], [-L, -half_W], **center_kwargs)
+    ax.plot([0, 0], [half_W, L], **center_kwargs)
 
-    # 2. Vùng xung đột
-    cz_size = W
-    cz_half = cz_size / 2
-    cz = patches.Rectangle((-cz_half, -cz_half), cz_size, cz_size,
+    # Vạch phân làn (nét đứt xám tại 3.5m và 7.0m từ tim đường)
+    lane_div_kwargs = {'color': 'gray', 'linestyle': '--', 'linewidth': 1, 'alpha': 0.7}
+    for offset in [3.5, 7.0]:
+        ax.plot([-L, -half_W], [-offset, -offset], **lane_div_kwargs)
+        ax.plot([-L, -half_W], [offset, offset], **lane_div_kwargs)
+        ax.plot([half_W, L], [-offset, -offset], **lane_div_kwargs)
+        ax.plot([half_W, L], [offset, offset], **lane_div_kwargs)
+        ax.plot([-offset, -offset], [-L, -half_W], **lane_div_kwargs)
+        ax.plot([offset, offset], [-L, -half_W], **lane_div_kwargs)
+        ax.plot([-offset, -offset], [half_W, L], **lane_div_kwargs)
+        ax.plot([offset, offset], [half_W, L], **lane_div_kwargs)
+
+    # 2. Vùng xung đột 21x21m (AI.md mục 1.1)
+    cz = patches.Rectangle((-half_W, -half_W), W, W,
                            linewidth=2, edgecolor='red', facecolor='red', alpha=0.15)
     ax.add_patch(cz)
 
-    # 3. Vạch dừng
-    stop_dist = 10.0
+    # 3. Vạch dừng tại s = -10.5m (AI.md mục 1.1)
+    stop_dist = 10.5
     stop_kwargs = {'color': 'blue', 'linewidth': 3}
-    ax.plot([-stop_dist, -stop_dist], [-half_W, 0], **stop_kwargs)
-    ax.plot([stop_dist, stop_dist], [0, half_W], **stop_kwargs)
-    ax.plot([0, half_W], [-stop_dist, -stop_dist], **stop_kwargs)
-    ax.plot([-half_W, 0], [stop_dist, stop_dist], **stop_kwargs)
+    ax.plot([-stop_dist, -stop_dist], [-half_W, 0], **stop_kwargs)   # Tây vào
+    ax.plot([stop_dist, stop_dist], [0, half_W], **stop_kwargs)       # Đông vào
+    ax.plot([0, half_W], [-stop_dist, -stop_dist], **stop_kwargs)     # Nam vào
+    ax.plot([-half_W, 0], [stop_dist, stop_dist], **stop_kwargs)      # Bắc vào
 
-    # Đèn tín hiệu (Vẽ tại 4 góc)
+    # Đèn tín hiệu (vẽ tại góc tiếp cận)
     light_radius = 1.0
     lights = {
         'North': patches.Circle((-half_W - 2, stop_dist), light_radius, color='red'),
@@ -127,50 +139,56 @@ def update(frame):
 
         # Nếu có xe đang chờ xếp hàng để vào nhánh
         if pending_queue[origin] > 0:
-            # Tìm xe cuối cùng (ở gần điểm spawn nhất) trên nhánh này
+            candidate_veh = generator.spawn_vehicle(
+                origin, initial_v=10.0, spawn_dist=SPAWN_DIST)
+            cand_s, cand_d = controller.get_frenet_coords(candidate_veh)
+
+            # Tìm xe gần điểm spawn nhất trong cùng làn (AI.md mục 2.3)
             min_s = float('inf')
-            last_veh = None
+            last_veh_in_lane = None
             for v in vehicles:
                 v_nav_state = getattr(v, 'nav_state', 'approaching')
                 if getattr(v, 'origin', '') == origin and v_nav_state == 'approaching':
-                    s_v, _ = controller.get_frenet_coords(v)
-                    if s_v < min_s:
-                        min_s = s_v
-                        last_veh = v
+                    s_v, d_v = controller.get_frenet_coords(v)
+                    # Chỉ so sánh xe trong cùng làn (độ lệch ngang < 2m)
+                    if abs(d_v - cand_d) < 2.0:
+                        if s_v < min_s:
+                            min_s = s_v
+                            last_veh_in_lane = v
 
             can_spawn = False
             spawn_v = 10.0
 
-            if last_veh is None:
+            if last_veh_in_lane is None:
+                # Không có xe phía trước → sinh tự do
                 can_spawn = True
                 spawn_v = 10.0
             else:
-                # Khoảng cách trống từ đầu xe mới đến đuôi xe phía trước (giả định xe mới là ô tô L=4.5m)
-                bumper_gap = (min_s - last_veh.L / 2) - (-SPAWN_DIST + 4.5 / 2)
-                if last_veh.v > 4.0:
-                    # Xe trước đang chạy bình thường: Cần khoảng cách động an toàn (>= 15m)
+                # Kiểm tra khoảng cách an toàn (AI.md mục 2.3)
+                bumper_gap = (min_s - last_veh_in_lane.L / 2) - \
+                    (-SPAWN_DIST + candidate_veh.L / 2)
+                if last_veh_in_lane.v > 4.0:
+                    # Xe trước đang chạy bình thường: cần d_gap > 15m
                     if bumper_gap > 15.0:
                         can_spawn = True
-                        spawn_v = min(10.0, max(last_veh.v, 5.0))
+                        spawn_v = min(10.0, max(last_veh_in_lane.v, 5.0))
                 else:
-                    # Xe trước đang dừng/bò chậm (hàng đợi ùn ứ):
-                    # Chỉ sinh thêm xe nếu khoảng trống đủ đỗ (>= 4.0m) và đặt vận tốc ban đầu = 0
+                    # Xe trước đang dừng/bò chậm: cần d_gap > 4m, spawn v = 0
                     if bumper_gap > 4.0:
                         can_spawn = True
                         spawn_v = 0.0
 
             if can_spawn:
                 pending_queue[origin] -= 1
-                new_veh = generator.spawn_vehicle(
-                    origin, initial_v=spawn_v, spawn_dist=SPAWN_DIST)
-                vehicles.append(new_veh)
+                candidate_veh.v = spawn_v
+                vehicles.append(candidate_veh)
 
-                # Tạo hình chữ nhật đồ họa đại diện cho xe
-                color = 'royalblue' if new_veh.v_type == 'Car' else 'limegreen'
-                rect = patches.Rectangle((-new_veh.L/2, -new_veh.W/2), new_veh.L, new_veh.W,
+                color = 'royalblue' if candidate_veh.v_type == 'Car' else 'limegreen'
+                rect = patches.Rectangle((-candidate_veh.L/2, -candidate_veh.W/2),
+                                         candidate_veh.L, candidate_veh.W,
                                          color=color, alpha=0.9, zorder=3)
                 ax.add_patch(rect)
-                vehicle_patches[new_veh] = rect
+                vehicle_patches[candidate_veh] = rect
 
     # 2. Điều khiển hành vi (IDM, Swerving, Tín hiệu đèn) và Cập nhật trạng thái
     signal_controller.step(DT)
@@ -191,8 +209,8 @@ def update(frame):
         t = transforms.Affine2D().rotate(veh.theta).translate(veh.x, veh.y)
         rect.set_transform(t + ax.transData)
 
-        # Kiểm tra nếu xe đi vượt khỏi khung nhìn + 10m thì xóa khỏi danh sách để nhẹ bộ nhớ
-        if abs(veh.x) > ZOOM_RANGE + 10 or abs(veh.y) > ZOOM_RANGE + 10:
+        # Xóa xe khi ra ngoài khu vực theo dõi (AI.md mục 2.3: |x| > 75m hoặc |y| > 75m)
+        if abs(veh.x) > 75.0 or abs(veh.y) > 75.0:
             to_remove.append(veh)
 
     # Hủy xe
