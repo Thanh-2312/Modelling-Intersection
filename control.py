@@ -364,22 +364,51 @@ class VehicleController:
                 return True
         return False
 
-    def get_bezier_points(self, origin, dest, turn_direction=None):
-        P0_dict = {
-            'West': (-3.5, -1.75), 'East': (3.5, 1.75),
-            'South': (1.75, -3.5), 'North': (-1.75, 3.5)
-        }
-        P2_dict = {
-            'West': (-3.5, 1.75), 'East': (3.5, -1.75),
-            'South': (-1.75, -3.5), 'North': (1.75, 3.5)
-        }
-        P0 = P0_dict.get(origin, (0, 0))
-        P2 = P2_dict.get(dest, (0, 0))
+    def get_bezier_points(self, veh):
+        """
+        Tính 3 điểm điều khiển Bezier bậc 2 cho quỹ đạo rẽ.
 
+        P0 = vị trí thực của xe tại biên ngã tư (dùng tọa độ thực, không hardcode làn).
+        P2 = điểm thoát ngã tư ở nhánh đích (làn phù hợp với hướng rẽ).
+        P1 = giao điểm của hướng P0 và hướng P2 → tạo cung cua tự nhiên.
+        """
+        origin = veh.origin
+        dest = veh.destination
+        half_W = 10.5   # Bán chiều rộng ngã tư (10.5m)
+
+        # ── P0: vị trí xe khi chạm biên ngã tư ──────────────────────────────
+        if origin == 'West':
+            P0 = (-half_W, veh.y)
+        elif origin == 'East':
+            P0 = (half_W, veh.y)
+        elif origin == 'South':
+            P0 = (veh.x, -half_W)
+        else:  # North
+            P0 = (veh.x, half_W)
+
+        # ── P2: điểm ra tại làn đích ─────────────────────────────────────────
+        # Rẽ phải → vào làn ngoài 5.25m, rẽ trái → làn trong 1.75m (từ tim đường)
+        exit_lane = 1.75 if veh.turn_direction == 'Left' else 5.25
+        # Mỗi hướng đến: xe chiếm phần đường BÊN PHẢI của nhánh đó
+        #   East-bound → y âm (phía Nam), West-bound → y dương (phía Bắc)
+        #   North-bound → x dương (phía Đông), South-bound → x âm (phía Tây)
+        if dest == 'East':
+            P2 = (half_W, -exit_lane)
+        elif dest == 'West':
+            P2 = (-half_W, exit_lane)
+        elif dest == 'North':
+            P2 = (exit_lane, half_W)
+        else:  # South
+            P2 = (-exit_lane, -half_W)
+
+        # ── P1: góc cua (giao điểm tiếp tuyến tại P0 và P2) ─────────────────
         if origin in ['West', 'East']:
             P1 = (P2[0], P0[1])
         else:
             P1 = (P0[0], P2[1])
+
+        # Lưu exit_lane để cập nhật target_d sau khi rẽ xong
+        veh._exit_lane = exit_lane
         return P0, P1, P2
 
     def update_navigation(self, veh, dt):
@@ -390,7 +419,7 @@ class VehicleController:
             veh.nav_state = 'approaching'
             veh.heading_branch = veh.origin
 
-        in_intersection = (abs(veh.x) <= 4.5 and abs(veh.y) <= 4.5)
+        in_intersection = (abs(veh.x) <= 11.5 and abs(veh.y) <= 11.5)
 
         if veh.nav_state == 'approaching':
             if in_intersection:
@@ -399,20 +428,19 @@ class VehicleController:
         if veh.nav_state == 'in_intersection':
             if veh.turn_direction == 'Straight':
                 dist_from_center = math.hypot(veh.x, veh.y)
-                if dist_from_center > 4.5:
-                    if veh.destination == 'East' and veh.x > 3.5:
+                if dist_from_center > 11.5:
+                    if veh.destination == 'East' and veh.x > 10.5:
                         veh.nav_state = 'leaving'
-                    elif veh.destination == 'West' and veh.x < -3.5:
+                    elif veh.destination == 'West' and veh.x < -10.5:
                         veh.nav_state = 'leaving'
-                    elif veh.destination == 'North' and veh.y > 3.5:
+                    elif veh.destination == 'North' and veh.y > 10.5:
                         veh.nav_state = 'leaving'
-                    elif veh.destination == 'South' and veh.y < -3.5:
+                    elif veh.destination == 'South' and veh.y < -10.5:
                         veh.nav_state = 'leaving'
             else:
                 if not hasattr(veh, 'turn_t'):
                     veh.turn_t = 0.0
-                    veh.P0, veh.P1, veh.P2 = self.get_bezier_points(
-                        veh.origin, veh.destination)
+                    veh.P0, veh.P1, veh.P2 = self.get_bezier_points(veh)
                     L_curve = math.hypot(veh.P0[0]-veh.P1[0], veh.P0[1]-veh.P1[1]) + math.hypot(
                         veh.P1[0]-veh.P2[0], veh.P1[1]-veh.P2[1])
                     veh.turn_length = max(L_curve * 0.75, 1.0)
@@ -442,6 +470,9 @@ class VehicleController:
             new_branch = equiv_origin[veh.destination]
             if veh.heading_branch != new_branch:
                 veh.heading_branch = new_branch
+                # Cập nhật target_d sang hệ toạ độ nhánh mới sau khi rẽ xong
+                exit_lane = getattr(veh, '_exit_lane', 1.75)
+                veh.target_d = -exit_lane
             veh.nav_state = 'departed'
 
     def step(self, vehicles, dt, signal_controller=None):
