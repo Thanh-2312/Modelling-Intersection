@@ -236,7 +236,7 @@ class VehicleController:
                     yield_s = s_ego + 1.0
                     dummy = DummyVehicle(s=yield_s, v=1.0)
                 else:
-                    yield_s = min(s_ego + 0.5, -2.5)
+                    yield_s = min(s_ego + 0.5, -10.5)
                     dummy = DummyVehicle(s=yield_s, v=0.0)
 
                 if t_ego < min_t_ego:
@@ -387,8 +387,15 @@ class VehicleController:
             P0 = (veh.x, half_W)
 
         # ── P2: điểm ra tại làn đích ─────────────────────────────────────────
-        # Rẽ phải → vào làn ngoài 5.25m, rẽ trái → làn trong 1.75m (từ tim đường)
-        exit_lane = 1.75 if veh.turn_direction == 'Left' else 5.25
+        # Rẽ trái → làn trong (1.75m), Rẽ phải → làn ngoài (8.75m), Đi thẳng → giữ làn
+        if veh.turn_direction == 'Left':
+            exit_lane = abs(getattr(veh, 'target_d', -1.75))
+            if exit_lane > 5.25: exit_lane = 5.25 # Không cho xe rẽ trái dạt ra làn ngoài cùng
+        elif veh.turn_direction == 'Right':
+            exit_lane = abs(getattr(veh, 'target_d', -8.75))
+            if exit_lane < 5.25: exit_lane = 5.25 # Không cho xe rẽ phải kẹp vào làn sát tim
+        else: # Straight
+            exit_lane = abs(getattr(veh, 'target_d', -5.25))
         # Mỗi hướng đến: xe chiếm phần đường BÊN PHẢI của nhánh đó
         #   East-bound → y âm (phía Nam), West-bound → y dương (phía Bắc)
         #   North-bound → x dương (phía Đông), South-bound → x âm (phía Tây)
@@ -516,13 +523,13 @@ class VehicleController:
             if signal_controller and veh.nav_state == 'approaching':
                 state = signal_controller.get_state(veh.origin)
                 front_s = s_ego + veh.L / 2
-                dist_to_stop = -10.0 - front_s
+                dist_to_stop = -10.5 - front_s
 
                 if state == 'R':
-                    # Chỉ dừng nếu đầu xe chưa vượt qua vạch dừng (-10.0)
+                    # Chỉ dừng nếu đầu xe chưa vượt qua vạch dừng (-10.5)
                     if dist_to_stop > 0.0:
-                        dummy = DummyVehicle(s=-10.0)
-                        if lead_veh is None or (self.get_frenet_coords(lead_veh)[0] - lead_veh.L/2 > -10.0):
+                        dummy = DummyVehicle(s=-10.5)
+                        if lead_veh is None or (self.get_frenet_coords(lead_veh)[0] - lead_veh.L/2 > -10.5):
                             lead_veh = dummy
                 elif state == 'Y':
                     if dist_to_stop > 0.0:
@@ -538,8 +545,8 @@ class VehicleController:
                                 veh.dilemma_decision = 'Stop' if random.random() < p_stop else 'Go'
 
                         if veh.dilemma_decision == 'Stop':
-                            dummy = DummyVehicle(s=-10.0)
-                            if lead_veh is None or (self.get_frenet_coords(lead_veh)[0] - lead_veh.L/2 > -10.0):
+                            dummy = DummyVehicle(s=-10.5)
+                            if lead_veh is None or (self.get_frenet_coords(lead_veh)[0] - lead_veh.L/2 > -10.5):
                                 lead_veh = dummy
                 elif state == 'G':
                     veh.dilemma_decision = None
@@ -562,10 +569,11 @@ class VehicleController:
                 crit_gap = 3.5 if veh.v_type == 'Car' else 3.0
                 if min_gap < crit_gap:
                     # Không đủ khoảng trống an toàn: Dừng chờ an toàn trước khi cắt qua tim đường
-                    yield_s = - \
-                        5.0 if veh.nav_state == 'approaching' else min(
-                            s_ego + 0.5, -2.5)
-                    dummy = DummyVehicle(s=yield_s, v=0.0)
+                    yield_s = -10.5 if veh.nav_state == 'approaching' else min(
+                        s_ego + 0.5, self.LEFT_TURN_WAIT_S)
+                    # Nếu xe đã nhích chờ (vận tốc thấp), cho phép nhích chậm (v_creep = 1.0) thay vì v=0.0
+                    v_dummy = 1.0 if veh.nav_state == 'in_intersection' else 0.0
+                    dummy = DummyVehicle(s=yield_s, v=v_dummy)
                     if lead_veh is None or self.get_frenet_coords(lead_veh)[0] > yield_s:
                         lead_veh = dummy
 
