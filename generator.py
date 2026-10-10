@@ -64,21 +64,21 @@ class TrafficGenerator:
 
         # ── Chọn làn theo hướng rẽ ─────────────────────────────────────────
         if turn == 'Left':
-            # Rẽ trái: ưu tiên làn 1 (sát tim đường), đôi khi dùng làn 2
-            lane_center = random.choices([1.75, 5.25], weights=[70, 30])[0]
+            # Mặc định: Làn trong cùng (làn 1) CHỈ ĐỂ RẼ TRÁI
+            lane_center = 1.75
         elif turn == 'Right':
-            # Rẽ phải: ưu tiên làn 3 (sát lề), đôi khi dùng làn 2
-            lane_center = random.choices([8.75, 5.25], weights=[70, 30])[0]
+            # Làn ngoài cùng (làn 3) CHO PHÉP ĐI THẲNG HOẶC RẼ PHẢI
+            lane_center = 8.75
         else:  # Straight
-            # Đi thẳng: làn 2 hoặc làn 3, KHÔNG dùng làn 1 (dành cho rẽ trái)
+            # Làn giữa (làn 2) CHỈ ĐỂ ĐI THẲNG, Làn ngoài cùng (làn 3) có thể đi thẳng
             lane_center = random.choices([5.25, 8.75], weights=[60, 40])[0]
 
         target_d = -lane_center
 
         # Xe máy có thể lệch nhẹ trong làn (mô phỏng dòng hỗn hợp)
         if v_type == 'Motorcycle':
-            # Làn rộng 3.5m, xe máy rộng 0.8m → lệch an toàn tối đa ≈ ±1.3m
-            target_d += random.uniform(-1.3, 1.3)
+            # Lệch an toàn trong làn để không chồng lấn lên xe khác
+            target_d += random.uniform(-0.6, 0.6)
 
         L = spawn_dist
 
