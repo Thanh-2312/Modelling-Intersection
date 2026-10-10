@@ -52,20 +52,10 @@ class VehicleController:
         id1, id2 = id(v1), id(v2)
         return (id1, id2) if id1 < id2 else (id2, id1)
 
-    def resolve_stochastic_priority(self, v1, v2):
-        """
-        Thuật toán điều phối quyền ưu tiên ngẫu nhiên (Stochastic Priority Model):
-        Phân định quyền ưu tiên giữa 2 phương tiện bất kỳ có quỹ đạo xung đột trong nút giao.
-        1. Tuân thủ Luật GTĐB Điều 24: Xe đã vào ngã tư trước hoặc đang ôm cua thoát nút có quyền ưu tiên.
-        2. Khi cùng tiếp cận: Chấm điểm Stochastic Priority Score kết hợp TTI, hướng đi,
-           loại xe và mức độ bạo dạn ngẫu nhiên của tài xế (Driver Aggressiveness).
-        3. Phân định thắng/thua theo mô hình xác suất Logit Choice.
-        Trả về: (winner, yielder).
-        """
+    def base_resolve_stochastic_priority(self, v1, v2):
         s1, _ = self.get_frenet_coords(v1)
         s2, _ = self.get_frenet_coords(v2)
 
-        # 0. Xe đã đi qua tâm ngã tư (s > 0.0 hoặc turn_t > 0.85): đã qua điểm xung đột, ưu tiên thoát nút
         if v1.turn_direction == 'Straight' and s1 > 0.0:
             return v1, v2
         if v2.turn_direction == 'Straight' and s2 > 0.0:
@@ -75,9 +65,6 @@ class VehicleController:
         if getattr(v2, 'turn_t', 0.0) > 0.85:
             return v2, v1
 
-        # 1. Xe rẽ trái ĐÃ ÔM CUA SÂU QUA LÀN ĐỐI DIỆN (turn_t > 0.50):
-        # Theo Luật GTĐB Điều 24: Xe đã vào ngã tư trước có quyền ưu tiên giải phóng ngã tư.
-        # Lúc này xe rẽ trái đã chiếm lòng đường, cần ưu tiên để thoát nút giao.
         t1 = getattr(v1, 'turn_t', 0.0)
         t2 = getattr(v2, 'turn_t', 0.0)
         if v1.turn_direction == 'Left' and v1.origin != v2.origin and t1 > 0.50:
@@ -85,7 +72,6 @@ class VehicleController:
         if v2.turn_direction == 'Left' and v1.origin != v2.origin and t2 > 0.50:
             return v2, v1
 
-        # 1.1 Xe đi thẳng đã vào sâu (mũi xe front_s > -4.0m) trong khi xe rẽ trái đối diện chưa ôm cua sâu (turn_t < 0.45):
         opp_origin1 = {'North': 'South', 'South': 'North', 'East': 'West', 'West': 'East'}.get(v1.origin)
         opp_origin2 = {'North': 'South', 'South': 'North', 'East': 'West', 'West': 'East'}.get(v2.origin)
         if v1.turn_direction == 'Straight' and v2.turn_direction == 'Left' and v2.origin == opp_origin1:
@@ -95,15 +81,11 @@ class VehicleController:
             if (s2 + v2.L / 2.0) > -4.0 and t1 < 0.45:
                 return v2, v1
 
-        # 2. Xe đã vào sâu trong ngã tư trong khi xe kia còn ở ngoài tiếp cận
-        # Theo Luật GTĐB Điều 24: Xe đã vào ngã tư trước có quyền ưu tiên giải phóng ngã tư.
         if (s1 > -5.0 and s2 < -8.5):
             return v1, v2
         if (s2 > -5.0 and s1 < -8.5):
             return v2, v1
 
-        # 2.1 Chống kẹt xe / đói quyền ưu tiên (Anti-starvation):
-        # Xe đã phải dừng nhường đường lâu (> 2.0s) có quyền ưu tiên thoát nút giao trước xe mới đến
         w1 = getattr(v1, 'yield_wait_time', 0.0)
         w2 = getattr(v2, 'yield_wait_time', 0.0)
         if w1 > 2.0 and w2 <= 1.5:
@@ -111,12 +93,10 @@ class VehicleController:
         if w2 > 2.0 and w1 <= 1.5:
             return v2, v1
 
-        # 3. Phân định quyền ưu tiên ngẫu nhiên (Logit Choice Model) khi cả hai cùng tranh chấp:
         key = self.get_conflict_pair_key(v1, v2)
         if key in self.conflict_negotiations:
             return self.conflict_negotiations[key]['winner'], self.conflict_negotiations[key]['yielder']
 
-        # Chấm điểm ưu tiên ngẫu nhiên (Logit Model)
         def calc_score(veh, s_pos):
             progress = 0.0
             if getattr(veh, 'nav_state', '') == 'in_intersection':
@@ -138,7 +118,6 @@ class VehicleController:
             agg = getattr(veh, 'aggressiveness', 1.0)
             stoch_val = 1.5 * (agg - 1.0)
             type_val = 0.3 if veh.v_type == 'Motorcycle' else 0.0
-
             wait_time = getattr(veh, 'yield_wait_time', 0.0)
             wait_val = min(wait_time * 2.5, 8.0)
 
@@ -146,8 +125,6 @@ class VehicleController:
 
         score1 = calc_score(v1, s1)
         score2 = calc_score(v2, s2)
-
-        # Mô hình xác suất Logit Choice: P(v1 wins) = 1 / (1 + exp(-delta / tau))
         delta = score1 - score2 + random.uniform(-0.30, 0.30)
         tau = 0.6
         p1 = 1.0 / (1.0 + math.exp(-max(-8.0, min(8.0, delta / tau))))
@@ -161,8 +138,56 @@ class VehicleController:
         return winner, yielder
 
     def resolve_head_to_head_conflict(self, straight_veh, left_veh):
-        """Tương thích ngược và chuyển tiếp sang hàm điều phối ngẫu nhiên hợp nhất."""
-        return self.resolve_stochastic_priority(straight_veh, left_veh)
+        s_s, _ = self.get_frenet_coords(straight_veh)
+        s_l, _ = self.get_frenet_coords(left_veh)
+        front_s = s_s + straight_veh.L / 2.0
+        turn_t = getattr(left_veh, 'turn_t', 0.0)
+
+        # 1. Xe đi thẳng đã qua sâu trong giao lộ (front_s > -2.0m): bắt buộc đi tiếp để giải phóng giao lộ!
+        if front_s > -2.0:
+            return straight_veh, left_veh
+
+        # 2. Xe rẽ trái đã ôm cua sâu qua làn (turn_t >= 0.65): xe rẽ trái ưu tiên thoát cua
+        if turn_t >= 0.65:
+            return left_veh, straight_veh
+
+        # 3. Xe đi thẳng đã vào ngã tư vượt quá vạch nhường (front_s > -3.5m)
+        if front_s > -3.5:
+            return straight_veh, left_veh
+
+        # 3. Xe đi thẳng còn ở ngoài vạch nhường (front_s <= -3.5m)
+        # và xe rẽ trái đã bắt đầu vào cua (turn_t > 0.30):
+        if turn_t > 0.30 and front_s <= -3.5:
+            return left_veh, straight_veh
+
+        # 4. Anti-Starvation: xe nào chờ lâu hơn (> 2.0s) được ưu tiên
+        w_s = getattr(straight_veh, 'yield_wait_time', 0.0)
+        w_l = getattr(left_veh, 'yield_wait_time', 0.0)
+        if w_s > 2.0 and w_l <= 1.5:
+            return straight_veh, left_veh
+        if w_l > 2.0 and w_s <= 1.5:
+            return left_veh, straight_veh
+
+        return self.base_resolve_stochastic_priority(straight_veh, left_veh)
+
+    def resolve_stochastic_priority(self, v1, v2):
+        s1, _ = self.get_frenet_coords(v1)
+        s2, _ = self.get_frenet_coords(v2)
+
+        # Xe đã qua điểm xung đột
+        if v1.turn_direction == 'Straight' and s1 > 0.0: return v1, v2
+        if v2.turn_direction == 'Straight' and s2 > 0.0: return v2, v1
+        if getattr(v1, 'turn_t', 0.0) > 0.85: return v1, v2
+        if getattr(v2, 'turn_t', 0.0) > 0.85: return v2, v1
+
+        opp_origin1 = {'North': 'South', 'South': 'North', 'East': 'West', 'West': 'East'}.get(v1.origin)
+        if v1.turn_direction == 'Straight' and v2.turn_direction == 'Left' and v2.origin == opp_origin1:
+            return self.resolve_head_to_head_conflict(v1, v2)
+        if v2.turn_direction == 'Straight' and v1.turn_direction == 'Left' and v1.origin == opp_origin1:
+            w, y = self.resolve_head_to_head_conflict(v2, v1)
+            return w, y
+
+        return self.base_resolve_stochastic_priority(v1, v2)
 
     def get_frenet_coords(self, veh):
         """
@@ -346,15 +371,6 @@ class VehicleController:
         return True
 
     def get_conflict_vehicle(self, ego, vehicles, signal_controller=None):
-        """
-        Xử lý xung đột quyền ưu tiên tại ngã tư (Intersection Priority & Conflict Avoidance).
-        Ngăn chặn Deadlock và đảm bảo tuân thủ luật giao thông:
-        1. Phương tiện đã vào ngã tư ('in_intersection') được ưu tiên giải phóng ngã tư, 
-           không nhường xe còn ở ngoài ('approaching').
-        2. Xe đi thẳng có quyền ưu tiên cao hơn xe rẽ.
-        3. Xe không nhường xe đang dừng chờ đèn đỏ.
-        4. Tránh Deadlock khi vận tốc nhỏ bằng cách so sánh vị trí thực tế tới tâm và dùng v_eff.
-        """
         if getattr(ego, 'nav_state', '') in ['leaving', 'departed']:
             return None
 
@@ -363,22 +379,19 @@ class VehicleController:
         if dist_ego > 15.0:
             return None
 
-        # Vận tốc hiệu dụng để ước tính thời gian, tránh chia cho 0 hoặc v quá nhỏ gây Deadlock
         v_ego_eff = max(ego.v, 3.0)
         t_ego = dist_ego / v_ego_eff
 
         conflict_dummy = None
         min_t_ego = float('inf')
 
-        # Hàm tính điểm ưu tiên theo công thức AI.md mục 4.4:
-        # Score = -1.0*TTI + 1.5*I_straight + 0.5*I_right + 2.0*I_intersection
-        # Xe có điểm số THẤP HƠN phải nhường
-        def priority_score(veh, dist, v_eff):
-            TTI = dist / v_eff
-            I_straight = 1.5 if veh.turn_direction == 'Straight' else 0.0
-            I_right = 0.5 if veh.turn_direction == 'Right' else 0.0
-            I_intersection = 2.0 if getattr(veh, 'nav_state', '') == 'in_intersection' else 0.0
-            return -1.0 * TTI + I_straight + I_right + I_intersection
+        opp_origin = {'North': 'South', 'South': 'North',
+                      'East': 'West', 'West': 'East'}.get(ego.origin)
+
+        cos_ego = math.cos(ego.theta)
+        sin_ego = math.sin(ego.theta)
+        front_s_ego = s_ego + ego.L / 2.0
+        dist_to_stop = -10.5 - front_s_ego
 
         for v in vehicles:
             if v == ego or getattr(v, 'nav_state', '') in ['leaving', 'departed']:
@@ -390,46 +403,62 @@ class VehicleController:
 
             v_nav = getattr(v, 'nav_state', 'approaching')
 
-            # 1. Xe đã vào ngã tư có quyền ưu tiên giải phóng ngã tư trước xe chưa vào
             if ego.nav_state == 'in_intersection' and v_nav == 'approaching':
                 continue
 
-            # 2. Không nhường xe đang bị đèn đỏ chặn ở vạch dừng
             if signal_controller and v_nav == 'approaching':
                 if signal_controller.get_state(v.origin) == 'R':
                     continue
 
-            # 3. Kiểm tra xem 2 quỹ đạo có giao cắt không
             if not self.paths_conflict(ego, v):
                 continue
 
-            # 4. Xung đột giữa 2 xe ngược chiều (Straight vs Left-turn):
-            opp_origin = {'North': 'South', 'South': 'North',
-                          'East': 'West', 'West': 'East'}.get(ego.origin)
             if v.origin == opp_origin:
-                # Đã được xử lý giảm tốc ở phần 5.1 bằng v_max_override.
                 if ego.turn_direction == 'Straight' and v.turn_direction == 'Left':
                     continue
                 elif ego.turn_direction == 'Left' and v.turn_direction == 'Straight':
-                    # Xe rẽ trái tiến từ từ vào ngã tư theo Bezier (được xe đi thẳng nhường)
                     continue
 
-            # 5. Phân định quyền ưu tiên ngẫu nhiên thống nhất (Stochastic Priority Model)
             winner, yielder = self.resolve_stochastic_priority(ego, v)
             ego_yields = (ego == yielder)
 
             if ego_yields:
                 is_green = (signal_controller and signal_controller.get_state(ego.origin) == 'G')
-                if is_green:
-                    # Khi đèn xanh: KHÔNG DỪNG TRƯỚC VẠCH ĐÈN XANH!
-                    # Xe tiếp tục tiến từ từ vào ngã tư với tốc độ an toàn (v_max_override = 2.5 m/s)
+                dx = v.x - ego.x
+                dy = v.y - ego.y
+                s_rel_v = dx * cos_ego + dy * sin_ego
+
+                # Don't Block the Box (HCM Gridlock Prevention):
+                is_cross = (v.origin != opp_origin)
+                v_at_entry_gate = False
+                if is_cross and (getattr(v, 'nav_state', '') == 'in_intersection') and (0.0 < s_rel_v < 8.0):
+                    d_rel_v = -dx * sin_ego + dy * cos_ego
+                    half_w_ego = ego.W / 2.0 + 0.3
+                    half_l_v = v.L / 2.0
+                    v_d = -math.sin(ego.theta) * (v.v * math.cos(v.theta)) + math.cos(ego.theta) * (v.v * math.sin(v.theta))
+                    has_cleared = False
+                    if v_d > 0.1 and (d_rel_v - half_l_v > half_w_ego):
+                        has_cleared = True
+                    elif v_d < -0.1 and (d_rel_v + half_l_v < -half_w_ego):
+                        has_cleared = True
+                    if not has_cleared:
+                        v_at_entry_gate = True
+
+                wait_too_long = (getattr(ego, 'stopped_green_time', 0.0) > 3.0)
+
+                if is_green and dist_to_stop > 0.0 and v_at_entry_gate and not wait_too_long:
+                    yield_s = -10.5
+                    dummy = DummyVehicle(s=yield_s, v=0.0)
+                    if t_ego < min_t_ego:
+                        min_t_ego = t_ego
+                        conflict_dummy = dummy
+                elif is_green:
                     curr = ego.v_max if getattr(ego, 'v_max_override', None) is None else ego.v_max_override
-                    ego.v_max_override = min(curr, 2.5)
+                    ego.v_max_override = min(curr, 2.0)
                 elif ego.nav_state == 'in_intersection':
                     curr = ego.v_max if getattr(ego, 'v_max_override', None) is None else ego.v_max_override
                     ego.v_max_override = min(curr, 2.0)
-                else:
-                    # Đèn đỏ hoặc vàng dừng: dừng trước vạch dừng -10.5m
+                elif dist_to_stop > 0.0:
                     yield_s = -10.5
                     dummy = DummyVehicle(s=yield_s, v=0.0)
                     if t_ego < min_t_ego:
@@ -625,8 +654,35 @@ class VehicleController:
                 ego.v_max_override = min(curr_cap, 2.0)
                 defensive_dummy = None
 
-        return defensive_dummy
+        if defensive_dummy is not None:
+            cb = getattr(defensive_dummy, '_caused_by', None)
+            if cb is not None:
+                opp_origin = {'North': 'South', 'South': 'North',
+                              'East': 'West', 'West': 'East'}.get(ego.origin)
 
+                # Head-to-Head (Opposing Straight vs Left):
+                if cb.origin == opp_origin:
+                    if ego.turn_direction == 'Left' and cb.turn_direction == 'Straight':
+                        winner, yielder = self.resolve_head_to_head_conflict(cb, ego)
+                        if ego == winner:
+                            return None  # Left turn has priority to clear!
+                        # Break deadlock: if cb is stopped (v < 0.2) and ego is already past midpoint (turn_t > 0.50):
+                        if cb.v < 0.2 and getattr(ego, 'turn_t', 0.0) > 0.50:
+                            return None
+
+                    elif ego.turn_direction == 'Straight' and cb.turn_direction == 'Left':
+                        s_ego_chk, _ = self.get_frenet_coords(ego)
+                        front_s = s_ego_chk + ego.L / 2.0
+                        winner, yielder = self.resolve_head_to_head_conflict(ego, cb)
+                        if ego == winner:
+                            # Straight ego has priority over oncoming left!
+                            # If left is not yet across ego's lane (turn_t <= 0.70 or cb.v < 0.3), Straight clears!
+                            if getattr(cb, 'turn_t', 0.0) <= 0.70 or cb.v < 0.3:
+                                return None
+                        if cb.v < 0.2 and front_s > -3.5:
+                            return None
+
+        return defensive_dummy
     def compute_lateral_swerving(self, ego_moto, lead_car, dt=0.1):
         """
         Lách ngang cho xe máy khi gặp ô tô đi chậm phía trước cùng chiều.
@@ -1021,20 +1077,17 @@ class VehicleController:
                 veh.theta += max(-max_steer, min(diff, max_steer))
 
     def step(self, vehicles, dt, signal_controller=None):
-        # Dọn dẹp bộ nhớ các cặp xe đã rời khỏi nút giao
         active_ids = {id(v) for v in vehicles if getattr(v, 'nav_state', '') not in ['leaving', 'departed']}
         keys_to_del = [k for k in self.conflict_negotiations if k[0] not in active_ids or k[1] not in active_ids]
         for k in keys_to_del:
             del self.conflict_negotiations[k]
 
-        # 0.1 Gán cá tính tài xế ngẫu nhiên (aggressiveness) & tốc độ cơ sở trong vùng xung đột
-        for v in vehicles:
-            if not hasattr(v, 'aggressiveness'):
-                v.aggressiveness = random.uniform(0.85, 1.25)
-                base_spd = self.BASE_CONFLICT_SPEED_MOTO if v.v_type == 'Motorcycle' else self.BASE_CONFLICT_SPEED_CAR
-                v.desired_conflict_speed = base_spd * v.aggressiveness
+        for veh in vehicles:
+            if not hasattr(veh, 'aggressiveness'):
+                veh.aggressiveness = random.uniform(0.85, 1.25)
+                base_spd = self.BASE_CONFLICT_SPEED_MOTO if veh.v_type == 'Motorcycle' else self.BASE_CONFLICT_SPEED_CAR
+                veh.desired_conflict_speed = base_spd * veh.aggressiveness
 
-        # 0.2 Xác định mật độ xe trong vùng xung đột và tính hệ số điều hòa tốc độ (Speed Harmonization)
         cz_vehicles = []
         for v in vehicles:
             if getattr(v, 'nav_state', '') in ['leaving', 'departed']:
@@ -1045,16 +1098,11 @@ class VehicleController:
                 cz_vehicles.append(v)
 
         n_cz = len(cz_vehicles)
-        if n_cz <= 1:
-            crowd_factor = 1.0
-        elif n_cz == 2:
-            crowd_factor = 0.90
-        elif n_cz == 3:
-            crowd_factor = 0.80
-        elif n_cz == 4:
-            crowd_factor = 0.72
-        else:
-            crowd_factor = max(0.65, 0.72 - 0.05 * (n_cz - 4))
+        if n_cz <= 1: crowd_factor = 1.0
+        elif n_cz == 2: crowd_factor = 0.90
+        elif n_cz == 3: crowd_factor = 0.80
+        elif n_cz == 4: crowd_factor = 0.72
+        else: crowd_factor = max(0.65, 0.72 - 0.05 * (n_cz - 4))
 
         for v in cz_vehicles:
             target_cz_spd = v.desired_conflict_speed * crowd_factor
@@ -1062,125 +1110,34 @@ class VehicleController:
                 target_cz_spd = min(v.v_max, 6.5)
             v.cz_speed_cap = target_cz_spd
 
-        # 0.3 Dọn dẹp cache đàm phán của các xe đã thoát nút giao
-        active_ids = {id(v) for v in vehicles if getattr(v, 'nav_state', '') not in ['leaving', 'departed']}
-        self.conflict_negotiations = {
-            k: info for k, info in self.conflict_negotiations.items()
-            if k[0] in active_ids and k[1] in active_ids
-        }
-
-        # Pre-pass: Phân định quyền ưu tiên ngẫu nhiên (Stochastic Priority Arbitration) cho các cặp xe xung đột
-        for i in range(len(vehicles)):
-            v1 = vehicles[i]
-            if getattr(v1, 'nav_state', '') in ['leaving', 'departed']:
-                continue
-            s1, _ = self.get_frenet_coords(v1)
-            if s1 < -15.0:
-                continue
-
-            for j in range(i + 1, len(vehicles)):
-                v2 = vehicles[j]
-                if getattr(v2, 'nav_state', '') in ['leaving', 'departed']:
-                    continue
-                s2, _ = self.get_frenet_coords(v2)
-                if s2 < -15.0:
-                    continue
-
-                if self.paths_conflict(v1, v2):
-                    self.resolve_stochastic_priority(v1, v2)
-
         for veh in vehicles:
-            # 1. Điều hướng ngã tư (Chỉ cập nhật trạng thái)
             self.update_nav_state(veh)
-
-            # 2. Tìm xe phía trước
             lead_veh = self.get_lead_vehicle(veh, vehicles)
-
             s_ego, d_ego = self.get_frenet_coords(veh)
 
-            # 2.0 Điều phối tốc độ vùng xung đột & giảm tốc nhường đường
             if getattr(veh, 'cz_speed_cap', None) is not None and getattr(veh, 'nav_state', '') in ['approaching', 'in_intersection']:
                 if s_ego >= -15.0:
                     curr_cap = veh.v_max if getattr(veh, 'v_max_override', None) is None else veh.v_max_override
                     veh.v_max_override = min(curr_cap, veh.cz_speed_cap)
 
-            # Nếu veh là yielder của xe winner đang ở trong ngã tư: hạ tốc độ để nhường
-            for other_v in cz_vehicles:
-                if other_v != veh and self.paths_conflict(veh, other_v):
-                    k = self.get_conflict_pair_key(veh, other_v)
-                    if k in self.conflict_negotiations:
-                        info = self.conflict_negotiations[k]
-                        if info['yielder'] == veh and info['winner'] == other_v:
-                            s_other, _ = self.get_frenet_coords(other_v)
-                            if s_other > -8.0 and getattr(other_v, 'nav_state', '') in ['in_intersection', 'approaching']:
-                                curr_cap = veh.v_max if getattr(veh, 'v_max_override', None) is None else veh.v_max_override
-                                veh.v_max_override = min(curr_cap, 2.2)
+            conflict_veh = self.get_conflict_vehicle(veh, vehicles, signal_controller)
+            if conflict_veh is not None:
+                if lead_veh is None or self.get_frenet_coords(lead_veh)[0] > conflict_veh.s:
+                    lead_veh = conflict_veh
 
-            # 2.1 Xử lý xung đột ngã tư chung (Intersection Conflict Avoidance)
-            conflict_dummy = self.get_conflict_vehicle(
-                veh, vehicles, signal_controller)
-            if conflict_dummy is not None:
-                if lead_veh is None or self.get_frenet_coords(lead_veh)[0] > conflict_dummy.s:
-                    lead_veh = conflict_dummy
+            defensive_veh = self.get_defensive_lead(veh, vehicles, signal_controller)
+            if defensive_veh is not None:
+                if lead_veh is None or self.get_frenet_coords(lead_veh)[0] > defensive_veh.s:
+                    lead_veh = defensive_veh
 
-            # 2.2 Phanh phòng thủ 2D (Defensive Driving / Collision Corridor)
-            defensive_dummy = self.get_defensive_lead(veh, vehicles, signal_controller)
-            if defensive_dummy is not None:
-                if lead_veh is None or self.get_frenet_coords(lead_veh)[0] > defensive_dummy.s:
-                    lead_veh = defensive_dummy
-
-            # 3. TTC 2D Encroachment Swerving & Giữ làn (CHỈ LÁCH KHI ĐÃ QUA VẠCH DỪNG s_ego >= -10.5m)
-            ttc2d_swerving = False
-            if veh.v_type == 'Motorcycle' and veh.turn_direction == 'Straight' and s_ego >= -10.5:
-                ttc2d_swerving = self.handle_intersection_ttc2d_and_swerving(veh, vehicles, dt)
-                if ttc2d_swerving:
-                    # Chỉ bỏ qua defensive_dummy NẾU xe máy đã thực sự dạt ngang thoát khỏi thân xe partner
-                    partner = getattr(veh, 'swerve_partner', None)
-                    if partner is not None and lead_veh == defensive_dummy:
-                        dx_p = partner.x - veh.x
-                        dy_p = partner.y - veh.y
-                        d_rel_lat = -dx_p * math.sin(veh.theta) + dy_p * math.cos(veh.theta)
-                        lat_clearance = abs(d_rel_lat) - (veh.W/2 + partner.W/2)
-                        if lat_clearance > 0.3:
-                            lead_veh = None
-
-            if not ttc2d_swerving:
-                swerving = False
-                # Tuyệt đối không lách khi chưa qua vạch dừng đèn xanh đèn đỏ (s_ego < -10.5)
-                # Chỉ xe máy ĐI THẲNG mới thực hiện lách làn
-                if veh.turn_direction == 'Straight' and s_ego >= -10.5 and veh.v_type == 'Motorcycle' and lead_veh is not None:
-                    # Trường hợp 1: Xe phía trước cùng chiều là ô tô
-                    if getattr(lead_veh, 'v_type', '') == 'Car' and not getattr(lead_veh, 'is_dummy', False):
-                        swerving = self.compute_lateral_swerving(veh, lead_veh, dt)
-                        if swerving:
-                            lead_veh = None
-                    # Trường hợp 2: Bị cản trở bởi defensive_dummy (xe ô tô cắt ngang chắn đường hoặc kẹt xe phía trước)
-                    elif getattr(lead_veh, 'is_dummy', False) and veh.v < 2.0:
-                        s_lead_dummy = getattr(lead_veh, 's', 999.0)
-                        if (s_lead_dummy - s_ego) < 8.0:
-                            # Tìm làn hợp lệ bên cạnh (-1.75, -5.25, -8.75)
-                            for cand_lane in [-1.75, -5.25, -8.75]:
-                                if abs(cand_lane - d_ego) > 1.5:
-                                    if self.is_lateral_gap_clear(veh, cand_lane, vehicles):
-                                        veh.target_d = cand_lane
-                                        veh._exit_lane = abs(cand_lane)
-                                        self.apply_frenet_offset(veh, cand_lane, dt=dt)
-                                        swerving = True
-                                        lead_veh = None
-                                        break
-                if not swerving:
-                    # Không áp dụng bẻ lái Frenet khi xe đang ôm cua rẽ trong ngã tư (đang lái theo Bezier)
-                    if veh.turn_direction == 'Straight' or veh.nav_state != 'in_intersection':
-                        target_d = getattr(veh, 'target_d', -5.25)
-                        self.apply_frenet_offset(veh, target_d=target_d, dt=dt)
-
-            # 4. Đèn tín hiệu & Vùng lưỡng lự (chỉ áp dụng cho xe đang tiếp cận chưa qua vạch dừng)
-            if signal_controller and veh.nav_state == 'approaching':
+            # Signal
+            if signal_controller:
                 state = signal_controller.get_state(veh.origin)
-                front_s = s_ego + veh.L / 2
+                front_s = s_ego + veh.L / 2.0
                 dist_to_stop = -10.5 - front_s
 
                 if state == 'R':
+                    veh.dilemma_decision = None
                     if dist_to_stop > 0.0:
                         dummy = DummyVehicle(s=-10.5)
                         if lead_veh is None or (self.get_frenet_coords(lead_veh)[0] - lead_veh.L/2 > -10.5):
@@ -1189,10 +1146,8 @@ class VehicleController:
                     if dist_to_stop > 0.0:
                         tti = dist_to_stop / veh.v if veh.v > 0.5 else 999.0
                         if veh.dilemma_decision is None:
-                            if tti > 5.0:
-                                veh.dilemma_decision = 'Stop'
-                            elif tti < 1.5:
-                                veh.dilemma_decision = 'Go'
+                            if tti > 5.0: veh.dilemma_decision = 'Stop'
+                            elif tti < 1.5: veh.dilemma_decision = 'Go'
                             else:
                                 p_stop = 1.0 / (1.0 + math.exp(5.816 - 1.620 * tti))
                                 veh.dilemma_decision = 'Stop' if random.random() < p_stop else 'Go'
@@ -1204,14 +1159,12 @@ class VehicleController:
                 elif state == 'G':
                     veh.dilemma_decision = None
 
-            # 5. Phân định quyền ưu tiên & nhường đường đối đầu (Straight vs Left-turn) theo tỉ lệ xác suất
+            # Straight vs Left yielding hold lines
             opp_origin = {'North': 'South', 'South': 'North',
                           'East': 'West', 'West': 'East'}.get(veh.origin)
-
             front_s = s_ego + veh.L / 2.0
 
             if veh.turn_direction == 'Straight' and veh.nav_state in ['approaching', 'in_intersection']:
-                # Tìm xem có xe rẽ trái đối diện nào đang hoạt động trong nút giao cần nhường không
                 active_opp_left = None
                 for v in vehicles:
                     if (v.origin == opp_origin and v.turn_direction == 'Left'
@@ -1229,70 +1182,59 @@ class VehicleController:
                 if active_opp_left is not None:
                     dist_to_center = 0.0 - s_ego
                     if -3.0 < dist_to_center < 25.0:
-                        wait_too_long = getattr(veh, 'yield_wait_time', 0.0) > 2.0
+                        wait_too_long = getattr(veh, 'yield_wait_time', 0.0) > 2.5
                         if not wait_too_long:
                             veh.yield_wait_time = getattr(veh, 'yield_wait_time', 0.0) + dt
-                            # Nếu mũi xe chưa tới vạch nhường STRAIGHT_WAIT_S (-5.0m):
                             if front_s < self.STRAIGHT_WAIT_S:
                                 veh.v_max_override = self.STRAIGHT_YIELD_SPEED
                                 wait_dummy = DummyVehicle(s=self.STRAIGHT_WAIT_S, v=0.0)
-                                if lead_veh is None or self.get_frenet_coords(lead_veh)[0] > wait_dummy.s:
-                                    lead_veh = wait_dummy
                             else:
-                                veh.v_max_override = 3.5
+                                wait_dummy = DummyVehicle(s=s_ego + 0.4, v=0.0)
+                            if lead_veh is None or self.get_frenet_coords(lead_veh)[0] > wait_dummy.s:
+                                lead_veh = wait_dummy
                         else:
                             veh.v_max_override = 2.5
                 else:
-                    veh.yield_wait_time = 0.0
+                    veh.yield_wait_time = max(0.0, getattr(veh, 'yield_wait_time', 0.0) - dt * 0.5)
 
             elif veh.turn_direction == 'Left' and veh.nav_state in ['approaching', 'in_intersection']:
-                # Tìm xe đi thẳng đối diện dẫn đầu (tiến gần nhất hoặc đang trong nút giao)
-                # Xe rẽ trái phải nhường các xe đi thẳng đối diện chưa qua hết nút giao:
-                # Tìm xe đi thẳng đối diện đang đe dọa giao cắt gần nhất (s_v trong khoảng [-15.0, 3.0])
                 threatening_straight = None
                 for v in vehicles:
                     if (v.origin == opp_origin and v.turn_direction == 'Straight'
                             and getattr(v, 'nav_state', 'approaching') in ['approaching', 'in_intersection']):
                         s_v, _ = self.get_frenet_coords(v)
-                        # Xe thẳng v đang tiếp cận hoặc đang trong ngã tư và chưa qua điểm giao cắt (+3.0m)
-                        if -15.0 <= s_v <= 3.0:
+                        if -15.0 <= s_v <= 5.0:
                             winner, yielder = self.resolve_head_to_head_conflict(v, veh)
                             if veh == yielder:
                                 threatening_straight = v
                                 break
 
                 if threatening_straight is not None:
-                    # Có ít nhất một xe đi thẳng đối diện có quyền ưu tiên và đang tới:
-                    # 1. Nếu xe rẽ trái ĐÃ ÔM CUA SÂU QUA LÀN ĐỐI DIỆN (turn_t > 0.65): nhanh chóng thoát nút
-                    if getattr(veh, 'turn_t', 0.0) > 0.65:
+                    if getattr(veh, 'turn_t', 0.0) > 0.75:
                         veh.v_max_override = 4.0
-                        if lead_veh is not None and getattr(lead_veh, 'is_dummy', False) and getattr(lead_veh, 's', 0.0) == self.LEFT_TURN_WAIT_S:
-                            lead_veh = None
                     else:
-                        # 2. Xe rẽ trái CHƯA QUA HẾT LÀN:
-                        wait_too_long = getattr(veh, 'yield_wait_time', 0.0) > 2.5
+                        s_threat, _ = self.get_frenet_coords(threatening_straight)
+                        threat_in_zone = (-3.5 <= s_threat <= 3.5 and threatening_straight.v > 0.5)
+                        wait_too_long = getattr(veh, 'yield_wait_time', 0.0) > 2.5 and not threat_in_zone
                         if not wait_too_long:
                             veh.yield_wait_time = getattr(veh, 'yield_wait_time', 0.0) + dt
                             if front_s < self.LEFT_TURN_WAIT_S:
                                 if front_s < self.LEFT_TURN_WAIT_S - 2.0:
                                     veh.v_max_override = self.LEFT_TURN_CREEP_SPEED
+                                    wait_dummy = None
                                 else:
                                     wait_dummy = DummyVehicle(s=self.LEFT_TURN_WAIT_S, v=0.0)
-                                    if lead_veh is None or self.get_frenet_coords(lead_veh)[0] > wait_dummy.s:
-                                        lead_veh = wait_dummy
                             else:
-                                # Xe đã vượt qua vạch dừng (đã ôm cua): tự tin giải phóng nút giao, không dừng chết giữa ngã tư
-                                veh.v_max_override = 3.5
+                                wait_dummy = DummyVehicle(s=s_ego + 0.4, v=0.0)
+                            if wait_dummy is not None:
+                                if lead_veh is None or self.get_frenet_coords(lead_veh)[0] > wait_dummy.s:
+                                    lead_veh = wait_dummy
                         else:
                             veh.v_max_override = 2.5
                 else:
-                    # Không còn xe đi thẳng nào cản trở: xe rẽ trái được tự do thoát cua
-                    veh.yield_wait_time = 0.0
+                    veh.yield_wait_time = max(0.0, getattr(veh, 'yield_wait_time', 0.0) - dt * 0.5)
                     veh.v_max_override = 4.0
-                    if lead_veh is not None and getattr(lead_veh, 'is_dummy', False) and getattr(lead_veh, 's', 0.0) == self.LEFT_TURN_WAIT_S:
-                        lead_veh = None
 
-            # 6. Tính IDM & Giảm tốc trước khi rẽ
             v0_orig = veh.v_max
             if getattr(veh, 'v_max_override', None) is not None:
                 veh.v_max = min(veh.v_max, veh.v_max_override)
@@ -1307,31 +1249,28 @@ class VehicleController:
                 v_turn_des = min(v_turn_des, veh.v_max)
 
                 if veh.nav_state == 'approaching':
-                    D_decel = max(0.0, (veh.v**2 - v_turn_des **
-                                  2) / (2 * abs(veh.a_comf)))
+                    D_decel = max(0.0, (veh.v**2 - v_turn_des ** 2) / (2 * abs(veh.a_comf)))
                     dist_to_stop = -10.0 - s_ego
-                    if 0 < dist_to_stop <= D_decel + 5.0 and veh.v > v_turn_des:
-                        veh.v_max = v_turn_des
-                        a_decel = self.compute_idm(veh, lead_veh)
-                        a_target = min(a_target, a_decel)
+                    if dist_to_stop <= D_decel:
+                        a_target = min(a_target, veh.a_comf)
                 elif veh.nav_state == 'in_intersection':
                     if veh.v > v_turn_des:
-                        veh.v_max = v_turn_des
-                        a_decel = self.compute_idm(veh, lead_veh)
-                        a_target = min(a_target, a_decel)
+                        a_target = min(a_target, veh.a_comf)
+
+            if veh.v_type == 'Motorcycle' and veh.nav_state in ['approaching', 'in_intersection']:
+                if s_ego >= -10.5:
+                    swerved = self.compute_lateral_swerving(veh, lead_veh, dt) if lead_veh else False
+                    if not swerved:
+                        self.apply_frenet_offset(veh, veh.target_d, K_p=0.35, dt=dt)
+                else:
+                    self.apply_frenet_offset(veh, veh.target_d, K_p=0.35, dt=dt)
+            elif veh.turn_direction == 'Straight' or veh.nav_state in ['leaving', 'departed']:
+                self.apply_frenet_offset(veh, veh.target_d, K_p=0.35, dt=dt)
 
             veh.v_max = v0_orig
             veh.set_acceleration(a_target)
-            
-            # Cập nhật theta bằng Bezier Curve (sau khi đã tính xong a_target)
             self.update_steering(veh, dt)
 
-        # 5. Cập nhật vị trí
         for veh in vehicles:
             veh.update_state(dt)
 
-
-# Khối Test nhanh
-if __name__ == "__main__":
-    controller = VehicleController()
-    print("Control module compiled successfully!")
